@@ -84,8 +84,47 @@ df['discount_depth']      = ((avg_price - df['price_per_unit']) / avg_price).cli
 
 print(f"Promoted rows    : {df['is_promoted'].sum()}")
 print(f"Non-promoted rows: {(df['is_promoted'] == 0).sum()}")
-print(df[['product_code', 'price_per_unit', 'is_promoted',
-          'price_x_promotion', 'discount_depth']].head(10))
+# print(df[['product_code', 'price_per_unit', 'is_promoted',
+#           'price_x_promotion', 'discount_depth']].head(10))
+
+# Wholesaler Features
+print("\n── Wholesaler Features")
+
+# Total demand per product — what wholesaler sees
+df['product_total_demand'] = df.groupby('product_code')['order_quantity'].transform('sum')
+
+# Unique retailers ordering this product — buyer reach
+df['product_unique_buyers'] = df.groupby('product_code')['retailer_id'].transform('nunique')
+
+# How frequently this product is reordered
+df['product_order_freq'] = df.groupby('product_code')['order_id'].transform('count')
+
+# Revenue this product generates for wholesaler
+df['product_revenue'] = df.groupby('product_code')['order_value_ghs'].transform('sum')
+
+# Average order value per region — demand strength by region
+df['region_avg_order_value'] = df.groupby(
+    'buyer_region_encoded')['order_value_ghs'].transform('mean')
+
+# Days since product was last ordered — freshness signal
+last_order_per_product    = df.groupby('product_code')['order_date'].transform('max')
+df['days_since_last_order'] = (df['order_date'].max() - last_order_per_product).dt.days
+
+# Slow mover flag — SRS FR-CAT-11 (not reordered in 60+ days)
+df['is_slow_mover'] = (df['days_since_last_order'] >= 60).astype(int)
+
+# Retailer order count — how active is this buyer
+df['retailer_order_count'] = df.groupby('retailer_id')['order_id'].transform('count')
+
+# Retailer avg quantity — buying pattern
+df['retailer_avg_quantity'] = df.groupby('retailer_id')['order_quantity'].transform('mean')
+
+# Retailer total spend — value of this retailer to wholesaler
+df['retailer_total_spend'] = df.groupby('retailer_id')['order_value_ghs'].transform('sum')
+
+print(df[['product_code', 'product_total_demand', 'product_unique_buyers',
+          'product_order_freq', 'is_slow_mover',
+          'retailer_order_count', 'retailer_avg_quantity']].head(10))
 
 # Drop rows with NaN from Lag (first 30 days)
 print("\n── Drop NaN rows from lag features")
