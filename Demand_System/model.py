@@ -84,19 +84,25 @@ print(f"Features           : {len(FEATURES)}")
 print(f"Retailer features  : 18")
 print(f"Wholesaler features: 7")
 
-# Time Aware Train/Test split
-print("\n---: Time-Aware Train/Test Split")
+# Time Aware Train/Validation/Test split (to prevent leakage)
+print("\n---: Time-Aware Train/Validation/Test Split")
 
-split_index = int(len(df) * 0.8)
-train_df = df.iloc[:split_index]
-test_df = df.iloc[split_index:]
+train_split = int(len(df) * 0.7)
+val_split = int(len(df) * 0.85)
+
+train_df = df.iloc[:train_split]
+val_df = df.iloc[train_split:val_split]
+test_df = df.iloc[val_split:]
 
 X_train = train_df[FEATURES]
 y_train = train_df[TARGET]
+X_val = val_df[FEATURES]
+y_val = val_df[TARGET]
 X_test = test_df[FEATURES]
 y_test = test_df[TARGET]
 
 print(f"Train : {X_train.shape} | {train_df['order_date'].min().date()} → {train_df['order_date'].max().date()}")
+print(f"Val   : {X_val.shape}   | {val_df['order_date'].min().date()} → {val_df['order_date'].max().date()}")
 print(f"Test  : {X_test.shape}  | {test_df['order_date'].min().date()} → {test_df['order_date'].max().date()}")
 
 # Evaluation
@@ -146,7 +152,8 @@ xgb_model = xgb.XGBRegressor(
     random_state= 42,
     verbose= 0,
 )
-xgb_model.fit(X_train, y_train, eval_set=[(X_test, y_test)],verbose=50)
+# Use validation set (not test set) for early stopping to prevent leakage
+xgb_model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=50)
 xgb_preds = xgb_model.predict(X_test)
 results.append(evaluate("XGBoost Regressor", y_test, xgb_preds))
 joblib.dump(xgb_model, 'outputs/models/xgb_regressor.pkl')
@@ -170,44 +177,75 @@ plt.tight_layout()
 plt.savefig('outputs/plots/xgb_actual_vs_predicted.png')
 plt.show()
 
-# Hyperparameter tuning using GridSearch
-print("\n---: GridSearchCV")
+# Hyperparameter tuning using GridSearch (Memory-Efficient)
+print("\n---: GridSearchCV (Memory-Optimized)")
 
+# parameter grid to prevent memory exhaustion
 param_grid = {
-'max_depth'        : [3, 6, 9],
-    'learning_rate'    : [0.01, 0.05, 0.1],
-    'n_estimators'     : [100, 200, 500],
-    'colsample_bytree' : [0.7, 1.0],
+    'max_depth'        : [3, 6],
+    'learning_rate'    : [0.05, 0.1],
+    'n_estimators'     : [100, 200],
+    'colsample_bytree' : [0.8],
 }
 
+#  2×2×2×1 = 8 combinations
+print(f"Testing {np.prod([len(v) for v in param_grid.values()])} parameter combinations")
+
 grid_search = GridSearchCV(
-    estimator= xgb.XGBRegressor(objective= 'reg:squarederror', random_state= 42, verbose= 0),
+    estimator= xgb.XGBRegressor(objective= 'reg:squarederror', random_state= 42, verbose= 0, tree_method= 'hist', max_bin= 256),
     param_grid= param_grid,
     scoring= 'neg_mean_squared_error',
     cv= 3,
     verbose= 2,
-    n_jobs= -1,
+    n_jobs= 1,
 )
-grid_search.fit(X_train, y_train)
+# Use subset of training data if dataset is too large
+train_sample_size = min(50000, len(X_train))
+if len(X_train) > train_sample_size:
+    print(f"Sampling {train_sample_size} rows from training set to prevent memory issues")
+    sample_indices = np.random.choice(len(X_train), train_sample_size, replace=False)
+    X_train_sample = X_train.iloc[sample_indices]
+    y_train_sample = y_train.iloc[sample_indices]
+else:
+    X_train_sample = X_train
+    y_train_sample = y_train
+grid_search.fit(X_train_sample, y_train_sample)
 print("\nBest Param:", grid_search.best_params_)
 
 tuned_preds = grid_search.predict(X_test)
 results.append(evaluate("XGBoost Tuned GridSearch", y_test, tuned_preds))
 joblib.dump(grid_search.best_estimator_, 'outputs/models/xgboost_tuned.pkl')
 
-# Long-Short Term Memory  LSTM
-print("\n---: LSTM")
+# Long-Short Term Memory LSTM with Look-Back Windows
+print("\n---: LSTM with Look-Back Windows")
 
+LOOKBACK = 14
+
+# Helper function to create sequences
+def create_sequences(X, y, lookback=14):
+    X_seq, y_seq = [], []
+    for i in range(lookback, len(X)):
+        X_seq.append(X[i-lookback:i])
+        y_seq.append(y[i])
+    return np.array(X_seq), np.array(y_seq)
+
+# Scale features (fit on train only)
 scaler_lstm = MinMaxScaler()
 X_train_scaled = scaler_lstm.fit_transform(X_train)
 X_test_scaled = scaler_lstm.transform(X_test)
 
-X_train_lstm = X_train_scaled.reshape((X_train_scaled.shape[0], 1, X_train_scaled.shape[1]))
-X_test_lstm = X_test_scaled.reshape((X_test_scaled.shape[0], 1, X_test_scaled.shape[1]))
+# Create sequences
+print(f"Creating {LOOKBACK}-day look-back sequences...")
+X_train_lstm, y_train_lstm = create_sequences(X_train_scaled, y_train.values, LOOKBACK)
+X_test_lstm, y_test_lstm = create_sequences(X_test_scaled, y_test.values, LOOKBACK)
 
+print(f"Train sequences: {X_train_lstm.shape} → {y_train_lstm.shape}")
+print(f"Test sequences : {X_test_lstm.shape} → {y_test_lstm.shape}")
+
+# LSTM Model with proper sequence input
 lstm_model = Sequential([
     LSTM(128, return_sequences=True,
-         input_shape=(1, len(FEATURES))),
+         input_shape=(LOOKBACK, len(FEATURES))),  # Now proper sequences
     Dropout(0.2),
     LSTM(64, return_sequences=False),
     Dropout(0.2),
@@ -218,9 +256,10 @@ lstm_model = Sequential([
 lstm_model.compile(optimizer='adam', loss='mean_squared_error', metrics=['mae'])
 lstm_model.summary()
 
-early_stop = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+early_stop = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
 history = lstm_model.fit(
-    X_train_lstm, y_train, validation_data=(X_test_lstm, y_test),
+    X_train_lstm, y_train_lstm,
+    validation_data=(X_test_lstm, y_test_lstm),
     epochs= 50,
     batch_size= 64,
     callbacks=[early_stop],
@@ -228,9 +267,10 @@ history = lstm_model.fit(
 )
 
 lstm_preds = lstm_model.predict(X_test_lstm).flatten()
-results.append(evaluate("LSTM", y_test, lstm_preds))
+results.append(evaluate("LSTM (14-day Look-Back)", y_test_lstm, lstm_preds))
 lstm_model.save('outputs/models/lstm_model.keras')
-joblib.dump(scaler_lstm, 'outputs/models/lstm_scaler.keras')
+joblib.dump(scaler_lstm, 'outputs/models/lstm_scaler.pkl')
+joblib.dump({'lookback': LOOKBACK}, 'outputs/models/lstm_config.pkl')
 
 plt.figure(figsize=(10, 4))
 plt.plot(history.history['loss'],     label='Train Loss')
@@ -242,9 +282,9 @@ plt.savefig('outputs/plots/lstm_loss.png')
 plt.show()
 
 plt.figure(figsize=(12, 4))
-plt.plot(y_test.values[:300], label='Actual',    color='steelblue', alpha=0.7)
-plt.plot(lstm_preds[:300],    label='Predicted', color='green',     alpha=0.7)
-plt.title('LSTM — Actual vs Predicted')
+plt.plot(y_test_lstm[:300], label='Actual',    color='steelblue', alpha=0.7)
+plt.plot(lstm_preds[:300],  label='Predicted', color='green',     alpha=0.7)
+plt.title('LSTM (14-day Look-Back) — Actual vs Predicted')
 plt.legend()
 plt.tight_layout()
 plt.savefig('outputs/plots/lstm_actual_vs_predicted.png')

@@ -1,6 +1,6 @@
 Model,RMSE,MAE,R2
-Multiple Linear Regression,4.1568,3.0913,0.5491
-XGBoost Regressor,3.3327,2.2227,0.7101
-XGBoost Tuned GridSearch,3.2587,2.1871,0.7229
-LSTM,3.3236,2.1975,0.7117
-Adaptive SGD (Online Learning),4.1719,3.0831,0.5458
+Multiple Linear Regression,4.5783,3.4275,0.4496
+XGBoost Regressor,3.6171,2.5174,0.6564
+XGBoost Tuned GridSearch,3.685,2.5819,0.6434
+LSTM (14-day Look-Back),5.5941,4.1143,0.178
+Adaptive SGD (Online Learning),4.3974,3.3461,0.4922

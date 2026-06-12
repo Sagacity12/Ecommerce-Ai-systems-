@@ -87,40 +87,61 @@ print(f"Non-promoted rows: {(df['is_promoted'] == 0).sum()}")
 # print(df[['product_code', 'price_per_unit', 'is_promoted',
 #           'price_x_promotion', 'discount_depth']].head(10))
 
-# Wholesaler Features
-print("\n── Wholesaler Features")
+# Wholesaler Features ( using expanding windows)
+print("\n── Wholesaler Features (Leak-Free)")
 
-# Total demand per product — what wholesaler sees
-df['product_total_demand'] = df.groupby('product_code')['order_quantity'].transform('sum')
+# Sort by date to ensure proper temporal order
+df = df.sort_values(['product_code', 'order_date']).reset_index(drop=True)
 
-# Unique retailers ordering this product — buyer reach
-df['product_unique_buyers'] = df.groupby('product_code')['retailer_id'].transform('nunique')
+# Total demand per product UP TO this point in time
+df['product_total_demand'] = df.groupby('product_code')['order_quantity'].transform(
+    lambda x: x.expanding().sum().shift(1).fillna(0))
 
-# How frequently this product is reordered
-df['product_order_freq'] = df.groupby('product_code')['order_id'].transform('count')
+# Unique retailers ordering this product UP TO this point
+df['product_unique_buyers'] = df.groupby('product_code')['retailer_id'].transform(
+    lambda x: x.expanding().apply(lambda y: len(set(y[:-1])) if len(y) > 1 else 0, raw=False))
 
-# Revenue this product generates for wholesaler
-df['product_revenue'] = df.groupby('product_code')['order_value_ghs'].transform('sum')
+# How frequently this product was ordered BEFORE this row
+df['product_order_freq'] = df.groupby('product_code').cumcount()
 
-# Average order value per region — demand strength by region
-df['region_avg_order_value'] = df.groupby(
-    'buyer_region_encoded')['order_value_ghs'].transform('mean')
+# Revenue this product generated BEFORE this order
+df['product_revenue'] = df.groupby('product_code')['order_value_ghs'].transform(
+    lambda x: x.expanding().sum().shift(1).fillna(0))
 
-# Days since product was last ordered — freshness signal
-last_order_per_product    = df.groupby('product_code')['order_date'].transform('max')
-df['days_since_last_order'] = (df['order_date'].max() - last_order_per_product).dt.days
+# Average order value per region UP TO this point
+df['region_avg_order_value'] = df.groupby('buyer_region_encoded')['order_value_ghs'].transform(
+    lambda x: x.expanding().mean().shift(1).fillna(x.mean()))
 
-# Slow mover flag — SRS FR-CAT-11 (not reordered in 60+ days)
+# Days since product was last ordered (using only past data)
+def days_since_last(group):
+    result = []
+    last_date = None
+    for date in group:
+        if last_date is None:
+            result.append(999)  # No previous order
+        else:
+            result.append((date - last_date).days)
+        last_date = date
+    return result
+
+df['days_since_last_order'] = df.groupby('product_code')['order_date'].transform(days_since_last)
+
+# Slow mover flag — not reordered in 60+ days
 df['is_slow_mover'] = (df['days_since_last_order'] >= 60).astype(int)
 
-# Retailer order count — how active is this buyer
-df['retailer_order_count'] = df.groupby('retailer_id')['order_id'].transform('count')
+# Retailer features (UP TO this point in time)
+df = df.sort_values(['retailer_id', 'order_date']).reset_index(drop=True)
 
-# Retailer avg quantity — buying pattern
-df['retailer_avg_quantity'] = df.groupby('retailer_id')['order_quantity'].transform('mean')
+df['retailer_order_count'] = df.groupby('retailer_id').cumcount()
 
-# Retailer total spend — value of this retailer to wholesaler
-df['retailer_total_spend'] = df.groupby('retailer_id')['order_value_ghs'].transform('sum')
+df['retailer_avg_quantity'] = df.groupby('retailer_id')['order_quantity'].transform(
+    lambda x: x.expanding().mean().shift(1).fillna(x.mean()))
+
+df['retailer_total_spend'] = df.groupby('retailer_id')['order_value_ghs'].transform(
+    lambda x: x.expanding().sum().shift(1).fillna(0))
+
+# Re-sort by date for consistency
+df = df.sort_values('order_date').reset_index(drop=True)
 
 print(df[['product_code', 'product_total_demand', 'product_unique_buyers',
           'product_order_freq', 'is_slow_mover',
